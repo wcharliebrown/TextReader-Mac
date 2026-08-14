@@ -76,6 +76,13 @@ between events, and audio started from a content script dies the moment you
 navigate. An offscreen document with the `AUDIO_PLAYBACK` reason is the only
 extension context that survives both, so that is where the audio queue lives.
 
+**MP3 export goes through Chrome's download manager,** not through that
+offscreen document. Chrome closes an `AUDIO_PLAYBACK` document after 30 seconds
+without audio playing, and rendering a whole article takes longer than that, so
+fetching the file inside the extension had it reaped mid-request. Handing the
+`POST` to `chrome.downloads` makes the browser own the transfer, which outlives
+both the offscreen document and the service worker.
+
 **Two round trips, not one.** `POST /v1/speak/prepare` returns the article split
 into sentence-sized chunks, each identified by a content hash; the client then
 pulls chunks as it needs them, three ahead of the playhead. Rendering a whole
@@ -159,9 +166,9 @@ Audio is cached in `~/Library/Caches/TextReaderAPI`, capped at 2 GB, pruned LRU.
 ## Tests
 
 ```sh
-.venv/bin/python -m pytest          # 75: text pipeline, cache, encoders, HTTP API
+.venv/bin/python -m pytest          # 98: text pipeline, cache, encoders, HTTP API
 node scripts/test_player.mjs        # 16: offscreen player state machine
-node scripts/test_background.mjs    # 10: menu / hotkey / offscreen routing
+node scripts/test_background.mjs    # 17: menu / hotkey / offscreen / download routing
 .venv/bin/python scripts/bench.py   # latency and throughput
 ```
 

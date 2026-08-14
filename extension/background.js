@@ -27,11 +27,6 @@ let uiTabId = null;
 const SPEAKING_STATES = new Set(['preparing', 'playing', 'paused']);
 export const isSpeaking = (state) => SPEAKING_STATES.has(state);
 
-// 'exporting' is reported over the top of the real playback state, so it says
-// nothing about whether audio is running. Acting on it would pull "Stop
-// speaking" out of the menu for the length of an export that runs alongside it.
-export const describesPlayback = (state) => state !== 'exporting';
-
 async function setStopVisible(visible) {
   try {
     await chrome.contextMenus.update('stop-speaking', { visible });
@@ -218,10 +213,10 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   } else if (info.menuItemId === 'stop-speaking') {
     await stopSpeaking();
   } else if (info.menuItemId === 'download-selection') {
-    await download(info.selectionText || (await getSelectionFromTab(tab.id)), tab.id);
+    await download(info.selectionText || (await getSelectionFromTab(tab.id)));
   } else if (info.menuItemId === 'download-page') {
     const { title, text } = await extractArticle(tab.id);
-    await download(text, tab.id, title);
+    await download(text, title);
   }
 });
 
@@ -251,27 +246,53 @@ export function mp3Filename(title) {
   return stem ? `${stem}.mp3` : 'article.mp3';
 }
 
-async function download(text, tabId, title) {
+// Handed to Chrome's download manager rather than fetched into a blob here.
+// An offscreen document is created with reason AUDIO_PLAYBACK, which Chrome
+// closes "after 30 seconds without audio playing" - and a whole article takes
+// longer than that to synthesize, so the document was being reaped mid-request
+// and the export died silently. A download is owned by the browser, so it
+// outlives both the offscreen document and this service worker.
+async function download(text, title) {
   report('download.requested', { chars: text?.length ?? 0 });
   if (!text?.trim()) return;
   const settings = await getSettings();
-  // A whole article can take a minute to synthesize and encode. Without the
-  // player on screen that is indistinguishable from the click doing nothing.
-  if (tabId != null) {
-    await showPlayer(tabId);
-    toUi({ type: 'status', state: 'exporting' });
+  const filename = mp3Filename(title);
+  try {
+    const id = await chrome.downloads.download({
+      url: `${settings.server}/v1/export`,
+      method: 'POST',
+      headers: [{ name: 'Content-Type', value: 'application/json' }],
+      body: JSON.stringify({
+        text,
+        voice: settings.voice,
+        speed: settings.speed,
+        format: 'mp3',
+      }),
+      filename,
+      saveAs: false,
+    });
+    report('download.started', { id, filename, chars: text.length });
+  } catch (e) {
+    report('download.failed', { message: String(e), filename });
   }
-  // The blob URL has to be minted in a DOM context; a service worker cannot
-  // create one, and chrome.downloads rejects data: URLs from extensions.
-  await toOffscreen({ type: 'export', text, ...settings, filename: mp3Filename(title) });
 }
+
+// The download outlives this worker, so its outcome arrives as an event rather
+// than as the resolution of the call above. Without this a server error shows
+// up only in Chrome's download list.
+chrome.downloads.onChanged.addListener((delta) => {
+  if (delta.state?.current === 'complete') report('download.ok', { id: delta.id });
+  else if (delta.state?.current === 'interrupted') {
+    report('download.interrupted', { id: delta.id, reason: delta.error?.current ?? 'unknown' });
+  }
+});
 
 // Messages from the offscreen player (status) and the on-page UI (commands).
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.target !== 'background') return false;
   if (msg.from === 'offscreen') {
     toUi({ type: 'status', ...msg });
-    if (describesPlayback(msg.state)) setStopVisible(isSpeaking(msg.state));
+    setStopVisible(isSpeaking(msg.state));
     return false;
   }
   // From the page UI. Re-learn which tab it is in: this worker may have been

@@ -276,41 +276,6 @@ class Player {
     await this.seek(this.index);
   }
 
-  async exportMp3(text, settings) {
-    // Reported as an override rather than by moving this.state, so an export
-    // started mid-article does not disturb what is currently playing.
-    this.emit({ state: 'exporting' });
-    let res;
-    try {
-      res = await fetch(`${settings.server}/v1/export`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text, voice: settings.voice, speed: settings.speed, format: 'mp3' }),
-      });
-    } catch {
-      res = null;
-    }
-    if (!res || !res.ok) {
-      this.emit({ state: 'error', message: 'export failed' });
-      return;
-    }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    try {
-      // saveAs:false lands it in ~/Downloads predictably; a Save dialog that
-      // opens behind the window looks exactly like nothing happening.
-      const filename = settings.filename || 'article.mp3';
-      const id = await chrome.downloads.download({ url, filename, saveAs: false });
-      report('download.ok', { id, bytes: blob.size, filename });
-      // Back to whatever playback is actually doing - idle hides the bar again.
-      this.emit();
-    } catch (e) {
-      report('download.failed', { message: String(e), bytes: blob.size });
-      this.emit({ state: 'error', message: `download failed: ${e}` });
-    } finally {
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    }
-  }
 }
 
 const player = new Player();
@@ -328,7 +293,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case 'prev':   await player.prev(); break;
       case 'rate':   await player.setRate(msg.rate); break;
       case 'status': player.emit(); break;
-      case 'export': await player.exportMp3(msg.text, msg); break;
     }
     sendResponse({ ok: true });
   })().catch((e) => {

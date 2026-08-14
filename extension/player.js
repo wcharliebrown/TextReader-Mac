@@ -123,12 +123,10 @@
 
       const pos = this.$('.pos');
       if (this.state === 'preparing') pos.textContent = 'preparing...';
-      else if (this.state === 'exporting') pos.textContent = 'encoding mp3...';
       else if (s.total) pos.textContent = `${(s.index ?? 0) + 1} / ${s.total}`;
       else pos.textContent = '-';
 
-      // Exporting drives no transport - the whole file is rendered server-side.
-      const idle = ['idle', 'error', 'exporting'].includes(this.state);
+      const idle = this.state === 'idle' || this.state === 'error';
       for (const sel of ['.prev', '.next', '.play']) this.$(sel).disabled = idle;
     }
   }

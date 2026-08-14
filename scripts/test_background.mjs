@@ -6,6 +6,9 @@ import assert from 'node:assert/strict';
 const menus = new Map();
 const sentToOffscreen = [];
 const sentToTabs = [];
+const downloaded = [];
+const fetched = [];   // telemetry bodies, so reports can be asserted on
+let onDownloadChanged;
 let onInstalled, onMenuClicked, onCommand, onMessage;
 let offscreenDocs = 0;
 let createCalls = 0;
@@ -60,12 +63,18 @@ globalThis.chrome = {
     sendMessage: async (tabId, msg) => { sentToTabs.push({ tabId, msg }); },
   },
   storage: { sync: { get: async (d) => d, set: async () => {} } },
-  downloads: { download: async () => 1 },
+  downloads: {
+    download: async (opts) => { downloaded.push(opts); return downloaded.length; },
+    onChanged: { addListener: (fn) => { onDownloadChanged = fn; } },
+  },
   permissions: { request: async () => true },
 };
 
 // Swallow the telemetry POSTs; a live server is not required for this harness.
-globalThis.fetch = async () => ({ ok: true, json: async () => ({}) });
+globalThis.fetch = async (_url, init) => {
+  try { fetched.push(JSON.parse(init?.body ?? '{}')); } catch { fetched.push({}); }
+  return { ok: true, json: async () => ({}) };
+};
 
 const bg = await import('../extension/background.js');
 onInstalled();
@@ -172,40 +181,47 @@ await check('mp3Filename falls back when there is no usable title', () => {
   }
 });
 
-await check('article download exports the extracted text under the page title', async () => {
+await check('article download is handed to Chrome, not fetched into the extension', async () => {
   offscreenDocs = 1;
+  downloaded.length = 0;
   sentToOffscreen.length = 0;
   await onMenuClicked({ menuItemId: 'download-page' }, { id: 7 });
   await settle();
-  const exp = sentToOffscreen.find((m) => m.type === 'export');
-  assert.ok(exp, 'export was never dispatched');
-  assert.equal(exp.text, 'Whole article body text.');
-  assert.equal(exp.filename, 'A Title With Slashes.mp3', 'settings spread clobbered the filename');
+  assert.equal(downloaded.length, 1, 'chrome.downloads.download was never called');
+  const d = downloaded[0];
+  assert.equal(d.filename, 'A Title With Slashes.mp3', 'settings spread clobbered the filename');
+  assert.equal(d.saveAs, false, 'a Save dialog looks like nothing happening');
+  assert.match(d.url, /\/v1\/export$/, `posted to ${d.url}`);
+  assert.equal(d.method, 'POST');
+  assert.equal(JSON.parse(d.body).text, 'Whole article body text.');
+  assert.deepEqual(d.headers, [{ name: 'Content-Type', value: 'application/json' }]);
+  // The whole point of the change: the offscreen document, which Chrome closes
+  // after 30s without audio, is not involved in an export at all.
+  assert.ok(!sentToOffscreen.some((m) => m.type === 'export'), 'export still went via offscreen');
 });
 
-await check('selection download still uses the generic name', async () => {
-  sentToOffscreen.length = 0;
+await check('selection download uses the same path and the generic name', async () => {
+  downloaded.length = 0;
   await onMenuClicked({ menuItemId: 'download-selection', selectionText: 'Just this bit.' }, { id: 7 });
   await settle();
-  const exp = sentToOffscreen.find((m) => m.type === 'export');
-  assert.ok(exp, 'export was never dispatched');
-  assert.equal(exp.text, 'Just this bit.');
-  assert.equal(exp.filename, 'article.mp3');
+  assert.equal(downloaded.length, 1, 'chrome.downloads.download was never called');
+  assert.equal(downloaded[0].filename, 'article.mp3');
+  assert.equal(JSON.parse(downloaded[0].body).text, 'Just this bit.');
 });
 
-await check('exporting does not pull Stop speaking out of the menu mid-playback', async () => {
-  onMessage({ target: 'background', from: 'offscreen', state: 'playing', index: 0, total: 3 }, {}, () => {});
-  await settle();
-  assert.equal(stopItem().visible, true, 'precondition: should be speaking');
-  onMessage({ target: 'background', from: 'offscreen', state: 'exporting' }, {}, () => {});
-  await settle();
-  assert.equal(stopItem().visible, true, 'an export hid the stop item while audio was playing');
-  assert.ok(!bg.describesPlayback('exporting'));
-  assert.ok(bg.describesPlayback('playing'));
+await check('a download never shows the player bar', () => {
+  // It would have nothing to clear it: the export completes in the browser,
+  // possibly after this worker has been terminated.
+  assert.ok(!sentToTabs.some((t) => t.msg.state === 'exporting'), 'stale exporting status');
 });
 
-await check('the exporting status still reaches the page UI', () => {
-  assert.ok(sentToTabs.some((t) => t.msg.state === 'exporting'), 'UI never saw the export');
+await check('download outcomes are reported from the onChanged event', async () => {
+  assert.ok(onDownloadChanged, 'no downloads.onChanged listener was registered');
+  const before = fetched.length;
+  onDownloadChanged({ id: 1, state: { current: 'interrupted' }, error: { current: 'SERVER_FAILED' } });
+  onDownloadChanged({ id: 2, state: { current: 'complete' } });
+  await settle();
+  assert.ok(fetched.length > before, 'neither outcome was reported');
 });
 
 console.log(failures ? `\n${failures} FAILED` : '\nall background checks passed');
