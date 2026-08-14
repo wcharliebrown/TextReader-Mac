@@ -1,6 +1,8 @@
 """Rules in textnorm decide how the article actually sounds, so each gets a test."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from server.textnorm import (
@@ -168,3 +170,70 @@ def test_full_pipeline_on_a_messy_passage():
 
 def test_empty_input_yields_no_chunks():
     assert normalize("   \n\n  ") == []
+
+
+# --------------------------------------------------------------------------
+# Regressions: abbreviations matching inside words, and shouted words.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("She was the best.", "best."),
+        ("That is the honest.", "honest."),
+        ("A hard test.", "test."),
+        ("It rose in revs.", "revs."),
+        ("The forest.", "forest."),
+    ],
+)
+def test_abbreviation_does_not_match_inside_a_word(text, expected):
+    """'est.' inside 'best.' produced 'bestimated'; 'vs.' inside 'revs.' produced 'reversus'."""
+    assert expand_text(text).endswith(expected)
+
+
+def test_abbreviation_still_expands_when_it_is_one():
+    assert expand_text("The est. cost") == "The estimated cost"
+    assert expand_text("Ali vs. Frazier") == "Ali versus Frazier"
+
+
+def test_abbreviation_inside_a_word_no_longer_swallows_the_sentence_break():
+    """Both sentences are over MIN_CHUNK_CHARS so the merge rule leaves them apart."""
+    assert normalize("By every reasonable measure that answer was the honest. Truth follows right here in a whole second sentence.") == [
+        "By every reasonable measure that answer was the honest.",
+        "Truth follows right here in a whole second sentence.",
+    ]
+
+
+@pytest.mark.parametrize("shout", ["HUGE", "STOP", "FREE", "BEST"])
+def test_shouted_real_words_are_not_spelled_out(shout):
+    """'a HUGE deal' used to read as 'a H U G E deal'."""
+    assert expand_acronyms(f"a {shout} deal") == f"a {shout.lower()} deal"
+
+
+@pytest.mark.parametrize("initialism", ["CIA", "FBI", "IMF", "HTTP"])
+def test_initialisms_are_still_spelled_out(initialism):
+    assert expand_acronyms(f"the {initialism} file") == f"the {' '.join(initialism)} file"
+
+
+@pytest.mark.parametrize("word_acronym", ["NASA", "JSON", "SCUBA"])
+def test_acronyms_pronounced_as_words_are_left_alone(word_acronym):
+    assert expand_acronyms(f"the {word_acronym} file") == f"the {word_acronym} file"
+
+
+@pytest.mark.parametrize("ambiguous", ["US", "IT", "AI", "SEC"])
+def test_initialisms_that_are_also_words_are_spelled_out(ambiguous):
+    """'the US' must not degrade to 'the us' via the dictionary check."""
+    assert expand_acronyms(f"the {ambiguous} team") == f"the {' '.join(ambiguous)} team"
+
+
+def test_word_list_falls_back_when_the_system_dictionary_is_missing(monkeypatch):
+    import server.textnorm as tn
+
+    tn._english_words.cache_clear()
+    monkeypatch.setattr(tn, "_WORD_LIST", Path("/nonexistent/words"))
+    try:
+        assert "best" in tn._english_words()
+        assert tn.expand_acronyms("a HUGE deal") == "a huge deal"
+    finally:
+        tn._english_words.cache_clear()

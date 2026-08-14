@@ -1,6 +1,8 @@
 """Turn messy web text into clean, speakable sentences.
 
-Three pure stages, no I/O, so every rule is unit-testable:
+Three pure stages so every rule is unit-testable. The only I/O is a cached,
+best-effort read of the system word list used to tell an emphasised word
+(HUGE) from an initialism (CIA); it degrades to a built-in list if absent.
 
     clean_text      strip the junk that copy-pasting from a web page drags along
     expand_text     rewrite symbols, numbers and abbreviations as spoken words
@@ -12,6 +14,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
+from pathlib import Path
 
 from num2words import num2words
 
@@ -112,9 +116,45 @@ _ABBREVIATIONS = {
     "Co.": "Company", "Jr.": "Junior", "Sr.": "Senior",
     "a.m.": "A M", "p.m.": "P M", "U.S.": "US", "U.K.": "UK", "E.U.": "EU",
 }
+# The lookbehind is load-bearing: without it "est." matches inside "best.",
+# producing "bestimated", and "vs." matches inside "revs.".
 _ABBREV_RE = re.compile(
-    "|".join(re.escape(k) for k in sorted(_ABBREVIATIONS, key=len, reverse=True))
+    r"(?<![A-Za-z])(?:"
+    + "|".join(re.escape(k) for k in sorted(_ABBREVIATIONS, key=len, reverse=True))
+    + r")"
 )
+
+_WORD_LIST = Path("/usr/share/dict/words")
+
+# Enough of the common emphasis words to stay useful where the system list is
+# missing. Anything absent is spelled out, which is the old behaviour.
+_FALLBACK_WORDS = frozenset("""
+best rest test west east most must just huge stop free love hate need want
+help wait care fast slow real true good bad big new now yes not all any
+never ever only very much more less same next last full open shut safe sure
+done gone here there this that then them they what when where why how who
+work hard easy soon late long short high low hot cold dead live loud
+""".split())
+
+
+@lru_cache(maxsize=1)
+def _english_words() -> frozenset[str]:
+    """Lower-cased system dictionary, or a small built-in list if unavailable."""
+    try:
+        text = _WORD_LIST.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return _FALLBACK_WORDS
+    return frozenset(w.strip().lower() for w in text.splitlines() if w.strip())
+
+
+# Initialisms whose lower-case form is an ordinary English word. Without this
+# list the dictionary check below would read "the US" as "the us".
+_ALWAYS_SPELL = {
+    "US", "USA", "UK", "EU", "UN", "IT", "AI", "AR", "VR", "ID", "PC", "TV",
+    "CD", "DVD", "HR", "PR", "IP", "OS", "UI", "UX", "EV", "AP", "ATM", "SEC",
+    "WHO", "GPS", "USB", "CEO", "CFO", "CTO", "GDP", "FBI", "CIA", "IRS", "FDA",
+    "AWS", "API", "CPU", "GPU", "SSD", "HTML", "CSS", "HTTP", "URL", "MRI",
+}
 
 # All-caps strings that are pronounced as words, not spelled out.
 _WORD_ACRONYMS = {
@@ -202,8 +242,14 @@ def _unit(m: re.Match[str]) -> str:
 
 def _acronym(m: re.Match[str]) -> str:
     word = m.group(1)
+    if word in _ALWAYS_SPELL:
+        return " ".join(word)
     if word in _WORD_ACRONYMS:
         return word
+    # A real word in capitals is emphasis, not an initialism. Reading "HUGE" as
+    # "H U G E" is the single most jarring thing the old rule did.
+    if word.lower() in _english_words():
+        return word.lower()
     # Space-separated capitals make the G2P read individual letter names.
     return " ".join(word)
 
