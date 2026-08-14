@@ -27,6 +27,11 @@ let uiTabId = null;
 const SPEAKING_STATES = new Set(['preparing', 'playing', 'paused']);
 export const isSpeaking = (state) => SPEAKING_STATES.has(state);
 
+// 'exporting' is reported over the top of the real playback state, so it says
+// nothing about whether audio is running. Acting on it would pull "Stop
+// speaking" out of the menu for the length of an export that runs alongside it.
+export const describesPlayback = (state) => state !== 'exporting';
+
 async function setStopVisible(visible) {
   try {
     await chrome.contextMenus.update('stop-speaking', { visible });
@@ -51,6 +56,11 @@ chrome.runtime.onInstalled.addListener(() => {
       id: 'download-selection',
       title: 'Download selection as MP3',
       contexts: ['selection'],
+    });
+    chrome.contextMenus.create({
+      id: 'download-page',
+      title: 'Download this article as MP3',
+      contexts: ['page'],
     });
     chrome.contextMenus.create({
       id: 'stop-speaking',
@@ -188,10 +198,14 @@ async function extractArticle(tabId) {
         .map((n) => n.innerText.trim())
         .filter((t) => t.length > 2)
         .join('\n\n');
-      return [heading ? heading.innerText.trim() : '', body].filter(Boolean).join('\n\n');
+      const title = (heading?.innerText || document.title || '').trim();
+      return {
+        title,
+        text: [title, body].filter(Boolean).join('\n\n'),
+      };
     },
   });
-  return result || '';
+  return result || { title: '', text: '' };
 }
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -200,11 +214,14 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === 'speak-selection') {
     await speak(info.selectionText || (await getSelectionFromTab(tab.id)), tab.id);
   } else if (info.menuItemId === 'speak-page') {
-    await speak(await extractArticle(tab.id), tab.id);
+    await speak((await extractArticle(tab.id)).text, tab.id);
   } else if (info.menuItemId === 'stop-speaking') {
     await stopSpeaking();
   } else if (info.menuItemId === 'download-selection') {
-    await download(info.selectionText || (await getSelectionFromTab(tab.id)));
+    await download(info.selectionText || (await getSelectionFromTab(tab.id)), tab.id);
+  } else if (info.menuItemId === 'download-page') {
+    const { title, text } = await extractArticle(tab.id);
+    await download(text, tab.id, title);
   }
 });
 
@@ -222,13 +239,31 @@ chrome.commands.onCommand.addListener(async (command) => {
 
 chrome.action.onClicked.addListener(() => chrome.runtime.openOptionsPage());
 
-async function download(text) {
+// chrome.downloads rejects path separators and platform-illegal characters, and
+// silently fails rather than explaining itself, so be conservative.
+export function mp3Filename(title) {
+  const stem = String(title || '')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[.\s]+|[.\s]+$/g, '')
+    .slice(0, 120)
+    .trim();
+  return stem ? `${stem}.mp3` : 'article.mp3';
+}
+
+async function download(text, tabId, title) {
   report('download.requested', { chars: text?.length ?? 0 });
   if (!text?.trim()) return;
   const settings = await getSettings();
+  // A whole article can take a minute to synthesize and encode. Without the
+  // player on screen that is indistinguishable from the click doing nothing.
+  if (tabId != null) {
+    await showPlayer(tabId);
+    toUi({ type: 'status', state: 'exporting' });
+  }
   // The blob URL has to be minted in a DOM context; a service worker cannot
   // create one, and chrome.downloads rejects data: URLs from extensions.
-  await toOffscreen({ type: 'export', text, ...settings });
+  await toOffscreen({ type: 'export', text, ...settings, filename: mp3Filename(title) });
 }
 
 // Messages from the offscreen player (status) and the on-page UI (commands).
@@ -236,7 +271,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.target !== 'background') return false;
   if (msg.from === 'offscreen') {
     toUi({ type: 'status', ...msg });
-    setStopVisible(isSpeaking(msg.state));
+    if (describesPlayback(msg.state)) setStopVisible(isSpeaking(msg.state));
     return false;
   }
   // From the page UI. Re-learn which tab it is in: this worker may have been

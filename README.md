@@ -61,6 +61,7 @@ the `extension/` directory.
 - Right-click a page → **Speak this article** (extracts the main content)
 - Right-click anywhere → **Stop speaking** (shown only while it is speaking)
 - Right-click a selection → **Download selection as MP3**
+- Right-click a page → **Download this article as MP3** (named after the page title)
 - `Cmd+Shift+S` speak, `Cmd+Shift+P` play/pause, `Cmd+Shift+X` stop
 - An on-page bar gives prev / play / stop / next and a speed toggle
 - Click the toolbar icon for settings — server address, voice, speed

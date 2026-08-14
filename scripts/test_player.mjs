@@ -14,6 +14,7 @@ globalThis.self = {
 
 const SERVER = process.env.SERVER || 'http://127.0.0.1:8842';
 const statuses = [];
+const downloaded = [];
 let listener = null;
 
 // --- stub chrome.* ---------------------------------------------------------
@@ -22,7 +23,9 @@ globalThis.chrome = {
     onMessage: { addListener: (fn) => { listener = fn; } },
     sendMessage: async (msg) => { statuses.push(msg); },
   },
-  downloads: { download: async () => 1 },
+  downloads: {
+    download: async (opts) => { downloaded.push(opts); return downloaded.length; },
+  },
 };
 
 // --- stub Web Audio --------------------------------------------------------
@@ -215,6 +218,45 @@ await check('an unreachable server reports an error rather than hanging', async 
   await settle(600);
   assert.equal(last().state, 'error', `expected error, got ${last().state}`);
   assert.match(last().message ?? '', /no server/);
+});
+
+await check('export saves under the filename it was given', async () => {
+  statuses.length = 0;
+  downloaded.length = 0;
+  await send({
+    type: 'export', text: 'A short passage to encode as an mp3 file.',
+    server: SERVER, voice: 'af_heart', speed: 1.0, filename: 'My Article.mp3',
+  });
+  await settle(400);
+  assert.equal(downloaded.length, 1, 'nothing was handed to chrome.downloads');
+  assert.equal(downloaded[0].filename, 'My Article.mp3');
+  assert.equal(downloaded[0].saveAs, false, 'a Save dialog looks like nothing happening');
+  assert.ok(seen('exporting'), 'the encode was never reported to the UI');
+});
+
+await check('export falls back to article.mp3 with no filename', async () => {
+  downloaded.length = 0;
+  await send({
+    type: 'export', text: 'Another short passage to encode.',
+    server: SERVER, voice: 'af_heart', speed: 1.0,
+  });
+  await settle(400);
+  assert.equal(downloaded.length, 1, 'nothing was handed to chrome.downloads');
+  assert.equal(downloaded[0].filename, 'article.mp3');
+});
+
+await check('export does not disturb audio that is already playing', async () => {
+  await send({ type: 'play', text: TEXT, server: SERVER, voice: 'af_heart', speed: 1.0, rate: 1.0 });
+  await settle(600);
+  assert.equal(last().state, 'playing', 'precondition: should be playing');
+  statuses.length = 0;
+  await send({
+    type: 'export', text: 'Exported while the article plays.',
+    server: SERVER, voice: 'af_heart', speed: 1.0, filename: 'Aside.mp3',
+  });
+  await settle(400);
+  assert.ok(seen('exporting'), 'the encode was never reported');
+  assert.equal(last().state, 'playing', `export left the player in ${last().state}`);
 });
 
 console.log(failures ? `\n${failures} FAILED` : '\nall player checks passed');

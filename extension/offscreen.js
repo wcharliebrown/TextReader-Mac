@@ -277,6 +277,9 @@ class Player {
   }
 
   async exportMp3(text, settings) {
+    // Reported as an override rather than by moving this.state, so an export
+    // started mid-article does not disturb what is currently playing.
+    this.emit({ state: 'exporting' });
     let res;
     try {
       res = await fetch(`${settings.server}/v1/export`, {
@@ -296,8 +299,11 @@ class Player {
     try {
       // saveAs:false lands it in ~/Downloads predictably; a Save dialog that
       // opens behind the window looks exactly like nothing happening.
-      const id = await chrome.downloads.download({ url, filename: 'article.mp3', saveAs: false });
-      report('download.ok', { id, bytes: blob.size });
+      const filename = settings.filename || 'article.mp3';
+      const id = await chrome.downloads.download({ url, filename, saveAs: false });
+      report('download.ok', { id, bytes: blob.size, filename });
+      // Back to whatever playback is actually doing - idle hides the bar again.
+      this.emit();
     } catch (e) {
       report('download.failed', { message: String(e), bytes: blob.size });
       this.emit({ state: 'error', message: `download failed: ${e}` });
