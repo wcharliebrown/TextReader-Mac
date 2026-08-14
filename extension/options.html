@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>TextReader settings</title>
+<style>
+  body { font: 15px/1.6 -apple-system, system-ui, sans-serif; max-width: 34rem;
+         margin: 2rem auto; padding: 0 1.25rem; color-scheme: light dark; }
+  h1 { font-size: 1.3rem; margin-bottom: .25rem; }
+  .sub { opacity: .65; margin-top: 0; }
+  label { display: block; margin: 1.1rem 0 .25rem; font-weight: 600; }
+  input, select { font: inherit; width: 100%; padding: .45rem .55rem;
+                  border: 1px solid rgba(128,128,128,.45); border-radius: 7px;
+                  background: canvas; color: canvastext; }
+  .row { display: flex; gap: .75rem; }
+  .row > div { flex: 1; }
+  .hint { font-size: .82rem; opacity: .6; margin-top: .25rem; }
+  button { font: inherit; margin-top: 1.5rem; padding: .5rem 1rem; border-radius: 7px;
+           border: 1px solid rgba(128,128,128,.45); background: canvas; color: canvastext;
+           cursor: pointer; }
+  #status { margin-left: .75rem; font-size: .9rem; }
+  .ok { color: #2a8a3e; } .bad { color: #c0392b; }
+</style>
+<h1>TextReader</h1>
+<p class="sub">Speech is generated on this Mac. Nothing is sent to a third party.</p>
+
+<label for="server">Server address</label>
+<input id="server" type="url" placeholder="http://127.0.0.1:8842">
+<div class="hint" id="health">checking…</div>
+
+<label for="voice">Voice</label>
+<select id="voice"></select>
+
+<div class="row">
+  <div>
+    <label for="speed">Synthesis speed</label>
+    <input id="speed" type="number" min="0.5" max="2" step="0.05">
+    <div class="hint">Baked into the audio; changing it re-renders and re-caches.</div>
+  </div>
+  <div>
+    <label for="rate">Playback rate</label>
+    <input id="rate" type="number" min="0.5" max="3" step="0.05">
+    <div class="hint">Applied during playback; changes instantly.</div>
+  </div>
+</div>
+
+<button id="save">Save</button><span id="status"></span>
+<script type="module" src="options.js"></script>

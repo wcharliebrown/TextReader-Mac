@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "TextReader",
+  "version": "0.1.0",
+  "description": "Speak selected text with a neural voice running locally on this Mac.",
+  "minimum_chrome_version": "116",
+  "permissions": ["contextMenus", "storage", "offscreen", "scripting", "activeTab", "downloads"],
+  "host_permissions": [
+    "http://127.0.0.1:8842/*",
+    "http://localhost:8842/*"
+  ],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "options_page": "options.html",
+  "action": { "default_title": "TextReader", "default_icon": {
+    "16": "icons/16.png", "32": "icons/32.png", "128": "icons/128.png" } },
+  "icons": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "commands": {
+    "speak-selection": {
+      "suggested_key": { "default": "Ctrl+Shift+S", "mac": "Command+Shift+S" },
+      "description": "Speak the selected text"
+    },
+    "toggle-playback": {
+      "suggested_key": { "default": "Ctrl+Shift+P", "mac": "Command+Shift+P" },
+      "description": "Play / pause"
+    },
+    "stop-speaking": {
+      "suggested_key": { "default": "Ctrl+Shift+X", "mac": "Command+Shift+X" },
+      "description": "Stop speaking"
+    }
+  },
+  "web_accessible_resources": [
+    { "resources": ["player.css"], "matches": ["<all_urls>"] }
+  ]
+}

@@ -1,0 +1,11 @@
+/* Injected into the host page. Only the host element is styled here; everything
+   inside lives in a shadow root so page CSS cannot reach it. */
+#textreader-player {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 2147483647;
+  width: auto;
+  height: auto;
+  color-scheme: light dark;
+}
