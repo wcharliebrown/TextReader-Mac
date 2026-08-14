@@ -217,5 +217,43 @@ await check('an unreachable server reports an error rather than hanging', async 
   assert.match(last().message ?? '', /no server/);
 });
 
+await check('the pause after each chunk is the one the server published', async () => {
+  // Chunk audio is trimmed server-side, so the scheduled gap IS the whole
+  // pause a listener hears - and a paragraph break must outlast a sentence one.
+  const S = 'This sentence is a fairly ordinary length for prose in an article. ';
+  const text = `${S.repeat(8).trim()}\n\n${S.repeat(4).trim()}`;
+
+  const job = await (await fetch(`${SERVER}/v1/speak/prepare`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text, voice: 'af_heart', speed: 1.0 }),
+  })).json();
+  const published = job.sentences.map((c) => c.gap);
+  assert.ok(published.length >= 3, `need several chunks, got ${published.length}`);
+  assert.ok(new Set(published).size > 1, 'server published a uniform gap; nothing to check');
+
+  started.length = 0;
+  await send({ type: 'play', text, server: SERVER, voice: 'af_heart', speed: 1.0, rate: 1.0 });
+  // Fresh text, so every chunk is synthesized rather than served from cache.
+  await settle(3000);
+  // drainScheduled() empties `started`, so copy each batch out before draining.
+  const scheduled = [];
+  for (let i = 0; i < 10 && scheduled.length < published.length; i++) {
+    scheduled.push(...started);
+    drainScheduled();
+    await settle(1200);
+  }
+  scheduled.push(...started);
+  scheduled.sort((a, b) => a.at - b.at);
+  assert.ok(scheduled.length >= 3, `only ${scheduled.length} scheduled; state=${last()?.state} total=${last()?.total} msg=${last()?.message}`);
+  for (let i = 1; i < scheduled.length; i++) {
+    const prev = scheduled[i - 1];
+    const measured = scheduled[i].at - (prev.at + prev.node.buffer.duration);
+    assert.ok(
+      Math.abs(measured - published[i - 1]) < 0.02,
+      `gap after chunk ${i - 1}: scheduled ${measured.toFixed(3)}s, published ${published[i - 1]}s`,
+    );
+  }
+});
+
 console.log(failures ? `\n${failures} FAILED` : '\nall player checks passed');
 process.exit(failures ? 1 : 0);

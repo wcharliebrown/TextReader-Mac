@@ -15,7 +15,7 @@ Measured on an M1 Mac Studio (32 GB):
 
 | | |
 |---|---|
-| Time to first audio | **~310 ms** |
+| Time to first audio | **~275 ms** |
 | Synthesis throughput | **24× real-time** (RTF 0.041) |
 | Cached re-read | **~6 ms** |
 | Memory | ~2 GB resident |
@@ -87,15 +87,30 @@ both the offscreen document and the service worker.
 into sentence-sized chunks, each identified by a content hash; the client then
 pulls chunks as it needs them, three ahead of the playhead. Rendering a whole
 article before playing anything would mean staring at a spinner for seven
-seconds. This way the first sentence arrives in ~310 ms and the rest renders
+seconds. This way the first chunk arrives in ~275 ms and the rest renders
 while you are listening to it. Seeking tells the server where you jumped to, so
 skipping ahead does not queue behind chunks nobody is waiting for.
 
-**Chunk size is a real trade-off.** Cut too finely and prosody sounds chopped,
-because the model loses the intonation contour spanning a clause. Cut too
-coarsely and the first chunk takes long enough to undo the point. Sentences,
-merged when short and split at clause boundaries when long, land around one to
-three seconds.
+**Only the first chunk is held short.** It alone decides how soon audio starts;
+by the time it is playing, the prefetch is already ahead. So the first chunk is
+capped at 150 characters and the rest are packed with whole sentences up to 300,
+which lets Kokoro carry an intonation contour across a full stop instead of
+restarting at every one. A typical article ends up with three of every four
+sentence boundaries rendered by the model rather than assembled by us. The hard
+ceiling is 450: measured, Kokoro renders one segment up to ~493 characters and
+splits internally at ~521, and an internal seam bakes in silence that cannot be
+trimmed afterwards.
+
+**Seams are trimmed, then paced deliberately.** Kokoro renders ~0.30 s of
+lead-in and ~0.47 s of tail on every chunk regardless of its length. Left in,
+they stack with the gap between chunks, so a sentence boundary ran to ~0.86 s —
+about double the 0.30–0.52 s the model renders between sentences handed to it
+together, which is what made assembled audio sound like a list being read.
+Chunks are now trimmed before caching and one deliberate pause is inserted:
+0.34 s between sentences, 0.60 s between paragraphs. The server sends the pause
+along with each chunk, so playback and a downloaded file are paced identically.
+`AUDIO_REV` in the cache key means changing any of this retires old renders
+rather than serving them forever.
 
 **Text normalisation does most of the work.** A model reading raw web text will
 happily pronounce `[1]`, read `1995` as "one thousand nine hundred ninety-five",
@@ -130,6 +145,8 @@ else. Select it with `TEXTREADER_ENGINE`.
 | `POST` | `/v1/audio/speech` | **OpenAI-compatible** — point any OpenAI TTS client here |
 | `POST` | `/v1/export` | Whole passage as one mp3/m4a/flac/opus file |
 | `GET` | `/v1/voices` | 54 voices with language and gender |
+| `POST` | `/v1/cache/clear` | Drop every cached render |
+| `POST` | `/v1/diag` | Sink for the extension's own diagnostics (see below) |
 | `GET` | `/healthz` | Engine, model, cache size |
 
 Because `/v1/audio/speech` matches OpenAI's schema, anything that already speaks
@@ -166,8 +183,8 @@ Audio is cached in `~/Library/Caches/TextReaderAPI`, capped at 2 GB, pruned LRU.
 ## Tests
 
 ```sh
-.venv/bin/python -m pytest          # 98: text pipeline, cache, encoders, HTTP API
-node scripts/test_player.mjs        # 16: offscreen player state machine
+.venv/bin/python -m pytest          # 113: text pipeline, cache, encoders, HTTP API
+node scripts/test_player.mjs        # 17: offscreen player state machine
 node scripts/test_background.mjs    # 17: menu / hotkey / offscreen / download routing
 .venv/bin/python scripts/bench.py   # latency and throughput
 ```
@@ -177,6 +194,10 @@ console reachable without opening their own devtools windows. They stub `chrome.
 and Web Audio and drive the real modules — the player harness runs against a live
 server. When something does go wrong in a browser, the extension also reports to
 `POST /v1/diag`, which lands in the server log next to the requests it explains.
+That endpoint is kept deliberately, not left over from debugging: it has since
+been the thing that identified two failures invisible from the browser side,
+including one where Chrome was closing the offscreen document mid-request. It
+posts only to this server, on this machine.
 
 ## Not implemented
 

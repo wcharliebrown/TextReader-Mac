@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server import app as app_module
+from server import config as cfg
 from server.engine import VoiceInfo
 
 VOICES = ["af_heart", "af_bella", "bm_george"]
@@ -76,10 +77,12 @@ def test_prepare_returns_ordered_chunks_with_keys(client):
 
 def test_identical_sentences_share_a_key(client):
     """Content addressing: a repeated sentence is rendered once, not twice."""
-    repeated = "The very same sentence appears twice in this passage. "
+    # Separate paragraphs, so packing cannot fold the repeats into different
+    # neighbours and give them different text to hash.
+    repeated = "The very same sentence appears twice in this passage."
     body = client.post(
         "/v1/speak/prepare",
-        json={"text": repeated + "A different sentence separates them here. " + repeated},
+        json={"text": "\n\n".join([repeated, "A different sentence separates them here.", repeated])},
     ).json()
     keys = [s["key"] for s in body["sentences"]]
     assert len(keys) > len(set(keys)), "repeated text should reuse a cache key"
@@ -154,3 +157,22 @@ def test_cancelling_one_job_does_not_touch_a_later_one(client):
     client.post("/v1/speak/cancel", json={"job_id": first["job_id"]})
     res = client.get(f"/v1/audio/{second['sentences'][0]['key']}.wav")
     assert res.status_code == 200
+
+
+def test_prepare_publishes_the_pause_after_each_chunk(client):
+    """The client schedules chunks itself, so the pacing has to travel with them."""
+    body = client.post(
+        "/v1/speak/prepare",
+        json={"text": "\n\n".join(["First paragraph runs here.", "Second paragraph runs here."])},
+    ).json()
+    gaps = [s["gap"] for s in body["sentences"]]
+    assert all(g > 0 for g in gaps)
+    assert gaps[0] == cfg.PARAGRAPH_GAP_S, "a paragraph break should breathe longer"
+
+
+def test_a_sentence_break_pauses_less_than_a_paragraph_break(client):
+    sentence = "This sentence is a fairly ordinary length for prose in an article. "
+    body = client.post("/v1/speak/prepare", json={"text": sentence * 12}).json()
+    gaps = {s["gap"] for s in body["sentences"]}
+    assert cfg.SENTENCE_GAP_S in gaps
+    assert cfg.SENTENCE_GAP_S < cfg.PARAGRAPH_GAP_S

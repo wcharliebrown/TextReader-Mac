@@ -26,7 +26,10 @@ self.addEventListener('unhandledrejection', (e) =>
 
 const HORIZON = 3;      // chunks scheduled ahead of the playhead
 const PREFETCH = 4;     // chunks fetched ahead of the playhead
-const GAP = 0.10;       // seconds of silence between chunks
+// Fallback only. The server sends a per-chunk gap, because it knows which
+// chunks end a paragraph and it has to pace an exported file identically.
+// Chunk audio is trimmed server-side, so this gap is the whole pause.
+const GAP = 0.34;
 
 class Player {
   constructor() {
@@ -153,7 +156,9 @@ class Player {
       };
       node.onended = () => this.onChunkEnded(entry);
       this.scheduled.push(entry);
-      this.playhead = entry.endAt + GAP;
+      // The pause that follows this chunk, not a uniform one: a paragraph
+      // break is given longer than a sentence break.
+      this.playhead = entry.endAt + (this.chunks[this.cursor]?.gap ?? GAP) / this.rate;
       report('scheduled', {
         index: entry.index, startAt: +startAt.toFixed(2),
         now: +this.ctx.currentTime.toFixed(2), ctxState: this.ctx.state,

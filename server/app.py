@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from . import __version__, audio as au, config as cfg
 from .cache import AudioCache, make_key
 from .engine import TTSEngine, create_engine
-from .textnorm import normalize
+from .textnorm import normalize_chunks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("textreader")
@@ -94,19 +94,27 @@ async def _synth_wav(text: str, voice: str, speed: float) -> bytes:
     async def run() -> bytes:
         loop = asyncio.get_running_loop()
         pcm = await loop.run_in_executor(_require_executor(), eng.synth, text, voice, speed)
-        return au.to_wav(pcm)
+        # Trimmed before caching, so the silence is paid for once and every
+        # consumer - playback, stream, export - sees the same clean edges.
+        return au.to_wav(au.trim_edges(pcm))
 
     return await cache.get_or_synth(key, run)
 
 
-async def _synth_all(texts: list[str], voice: str, speed: float) -> np.ndarray:
+def _gap_after(para_end: bool) -> float:
+    return cfg.PARAGRAPH_GAP_S if para_end else cfg.SENTENCE_GAP_S
+
+
+async def _synth_all(
+    chunks: list[tuple[str, bool]], voice: str, speed: float
+) -> np.ndarray:
     """Synthesize every chunk and concatenate with natural pauses."""
     segments = []
-    for text in texts:
+    for text, _ in chunks:
         wav = await _synth_wav(text, voice, speed)
         pcm = np.frombuffer(au.wav_payload(wav), dtype="<i2").astype(np.float32) / 32767.0
         segments.append(pcm)
-    return au.join(segments, cfg.SENTENCE_GAP_S)
+    return au.join(segments, [_gap_after(para_end) for _, para_end in chunks])
 
 
 async def _prefetch_job(job: Job) -> None:
@@ -242,15 +250,20 @@ async def prepare(req: PrepareRequest):
     voice, speed = _validate(req.voice, req.speed, req.text)
     eng = _require_engine()
 
-    chunks = normalize(req.text)
+    chunks = normalize_chunks(req.text)
     if not chunks:
         raise HTTPException(400, "nothing speakable in input")
 
     job = Job(id=uuid.uuid4().hex[:12], voice=voice, speed=speed)
-    for idx, text in enumerate(chunks):
+    for idx, (text, para_end) in enumerate(chunks):
         key = make_key(eng.id, voice, speed, text)
         cache.remember(key, text, voice, speed)
-        job.sentences.append({"idx": idx, "text": text, "key": key})
+        # The client schedules chunks itself, so it needs the pause to leave
+        # after each one. Keeping the tuning here means playback and a
+        # downloaded file are paced identically.
+        job.sentences.append(
+            {"idx": idx, "text": text, "key": key, "gap": _gap_after(para_end)}
+        )
     _register(job)
 
     # A newly selected passage takes priority over whatever was being rendered.
@@ -316,20 +329,19 @@ async def stream(
         target = _jobs.get(job_id)
         if target is None:
             raise HTTPException(404, "unknown job_id")
-        chunks = [s["text"] for s in target.sentences]
+        chunks = [(s["text"], s.get("gap") == cfg.PARAGRAPH_GAP_S) for s in target.sentences]
         voice, speed = target.voice, target.speed
     elif text:
         voice, speed = _validate(voice, speed, text)
-        chunks = normalize(text)
+        chunks = normalize_chunks(text)
     else:
         raise HTTPException(400, "pass either text or job_id")
 
     async def body():
         yield au.streaming_wav_header()
-        gap = au.to_pcm16(au.silence(cfg.SENTENCE_GAP_S))
-        for i, chunk in enumerate(chunks):
+        for i, (chunk, para_end) in enumerate(chunks):
             if i:
-                yield gap
+                yield au.to_pcm16(au.silence(_gap_after(chunks[i - 1][1])))
             wav = await _synth_wav(chunk, voice, speed)
             yield au.wav_payload(wav)
 
@@ -340,7 +352,7 @@ async def stream(
 async def speech(req: SpeechRequest):
     """OpenAI-compatible endpoint, so existing OpenAI-TTS clients just work."""
     voice, speed = _validate(req.voice, req.speed, req.input)
-    chunks = normalize(req.input)
+    chunks = normalize_chunks(req.input)
     if not chunks:
         raise HTTPException(400, "nothing speakable in input")
     pcm = await _synth_all(chunks, voice, speed)
@@ -354,7 +366,7 @@ async def speech(req: SpeechRequest):
 @app.post("/v1/export")
 async def export(req: ExportRequest):
     voice, speed = _validate(req.voice, req.speed, req.text)
-    chunks = normalize(req.text)
+    chunks = normalize_chunks(req.text)
     if not chunks:
         raise HTTPException(400, "nothing speakable in input")
     pcm = await _synth_all(chunks, voice, speed)

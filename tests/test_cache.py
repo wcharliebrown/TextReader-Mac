@@ -85,3 +85,13 @@ def test_params_registry_roundtrip(cache):
     cache.remember("k1", "some text", "af_heart", 1.0)
     assert cache.params_for("k1") == ("some text", "af_heart", 1.0)
     assert cache.params_for("missing") is None
+
+
+def test_audio_revision_is_part_of_the_key(monkeypatch):
+    """Changing how audio is produced must retire existing renders."""
+    import server.cache as cache_module
+
+    before = cache_module.make_key("kokoro-mlx", "af_heart", 1.0, "Hello there.")
+    monkeypatch.setattr(cache_module, "AUDIO_REV", cache_module.AUDIO_REV + 1)
+    after = cache_module.make_key("kokoro-mlx", "af_heart", 1.0, "Hello there.")
+    assert before != after, "a pipeline change would have served stale audio"

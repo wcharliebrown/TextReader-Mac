@@ -9,11 +9,11 @@ import struct
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import numpy as np
 
-from .config import SAMPLE_RATE
+from .config import SAMPLE_RATE, TRIM_PAD_S, TRIM_THRESHOLD
 
 # Formats ffmpeg encodes for us: (muxer, codec args, content type, needs_seek).
 # The MP4 family cannot be muxed to a pipe - it has to rewind to write the moov
@@ -72,13 +72,41 @@ def silence(seconds: float) -> np.ndarray:
     return np.zeros(int(seconds * SAMPLE_RATE), dtype=np.float32)
 
 
-def join(segments: Iterable[np.ndarray], gap_s: float) -> np.ndarray:
-    """Concatenate audio segments with a short pause between them."""
+def trim_edges(
+    audio: np.ndarray,
+    threshold: float = TRIM_THRESHOLD,
+    pad_s: float = TRIM_PAD_S,
+) -> np.ndarray:
+    """Strip the lead-in and tail silence Kokoro renders around every chunk.
+
+    The model emits ~0.30s before the first phoneme and ~0.47s after the last,
+    regardless of chunk length. Concatenating chunks therefore stacks silence
+    at every seam. A small pad is kept so the attack and decay survive.
+    """
+    if audio.size == 0:
+        return audio
+    loud = np.flatnonzero(np.abs(audio) > threshold)
+    if loud.size == 0:
+        return np.zeros(0, dtype=np.float32)
+    pad = int(pad_s * SAMPLE_RATE)
+    start = max(0, int(loud[0]) - pad)
+    end = min(audio.size, int(loud[-1]) + 1 + pad)
+    return audio[start:end]
+
+
+def join(segments: Iterable[np.ndarray], gap_s: float | Sequence[float]) -> np.ndarray:
+    """Concatenate audio segments, pausing between them.
+
+    `gap_s` is either one pause for every seam, or one per seam so a paragraph
+    break can breathe longer than a sentence break.
+    """
+    segments = list(segments)
+    gaps = [gap_s] * len(segments) if isinstance(gap_s, (int, float)) else list(gap_s)
     parts: list[np.ndarray] = []
-    gap = silence(gap_s)
     for i, seg in enumerate(segments):
         if i:
-            parts.append(gap)
+            # gaps[i - 1] is the pause that follows segment i - 1.
+            parts.append(silence(gaps[i - 1] if i - 1 < len(gaps) else 0.0))
         parts.append(seg)
     return np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
 

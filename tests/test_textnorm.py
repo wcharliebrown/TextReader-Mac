@@ -5,11 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from server.config import FIRST_CHUNK_CHARS, MAX_CHUNK_CHARS, TARGET_CHUNK_CHARS
 from server.textnorm import (
     clean_text,
     expand_acronyms,
     expand_text,
     normalize,
+    normalize_chunks,
+    split_chunks,
     split_sentences,
 )
 
@@ -127,11 +130,16 @@ def test_initials_are_not_sentence_breaks():
 
 
 def test_real_sentence_breaks_are_found():
+    """Boundary detection, isolated from packing by a target of one character."""
     text = (
         "The first sentence runs on for a while so it clears the merge threshold. "
         "The second sentence also runs on for a while and clears it too."
     )
-    assert len(split_sentences(text)) == 2
+    chunks = split_chunks(text, min_chars=0, target_chars=1, first_chars=1)
+    assert [c for c, _ in chunks] == [
+        "The first sentence runs on for a while so it clears the merge threshold.",
+        "The second sentence also runs on for a while and clears it too.",
+    ]
 
 
 def test_short_fragments_are_merged():
@@ -141,8 +149,14 @@ def test_short_fragments_are_merged():
 
 def test_long_sentence_is_split_at_clause_boundaries():
     long = "This clause runs on, " * 30
-    chunks = split_sentences(long)
+    chunks = split_sentences(long, max_chars=300)
     assert chunks and all(len(c) <= 300 for c in chunks)
+
+
+def test_no_chunk_exceeds_the_length_kokoro_renders_in_one_pass():
+    """Past ~500 characters Kokoro splits internally and bakes in its own seam."""
+    long = "This clause runs on and on, " * 60
+    assert all(len(c) <= MAX_CHUNK_CHARS < 500 for c in split_sentences(long))
 
 
 def test_split_never_loses_or_duplicates_words():
@@ -198,11 +212,12 @@ def test_abbreviation_still_expands_when_it_is_one():
 
 
 def test_abbreviation_inside_a_word_no_longer_swallows_the_sentence_break():
-    """Both sentences are over MIN_CHUNK_CHARS so the merge rule leaves them apart."""
-    assert normalize("By every reasonable measure that answer was the honest. Truth follows right here in a whole second sentence.") == [
-        "By every reasonable measure that answer was the honest.",
-        "Truth follows right here in a whole second sentence.",
-    ]
+    """The period must survive; packing may then place both in one chunk."""
+    spoken = " ".join(normalize(
+        "By every reasonable measure that answer was the honest. "
+        "Truth follows right here in a whole second sentence."
+    ))
+    assert "the honest. Truth" in spoken, spoken
 
 
 @pytest.mark.parametrize("shout", ["HUGE", "STOP", "FREE", "BEST"])
@@ -237,3 +252,43 @@ def test_word_list_falls_back_when_the_system_dictionary_is_missing(monkeypatch)
         assert tn.expand_acronyms("a HUGE deal") == "a huge deal"
     finally:
         tn._english_words.cache_clear()
+
+
+# --------------------------------------------------------------------------
+# Chunk packing: whole sentences grouped so Kokoro carries intonation across a
+# full stop, with only the first chunk kept short for time-to-first-audio.
+# --------------------------------------------------------------------------
+
+SENTENCE = "This sentence is a fairly ordinary length for prose in an article. "
+
+
+def test_only_the_first_chunk_is_held_short():
+    chunks = split_sentences(SENTENCE * 12)
+    assert len(chunks) > 2, "nothing to compare"
+    assert len(chunks[0]) <= FIRST_CHUNK_CHARS
+    assert any(len(c) > FIRST_CHUNK_CHARS for c in chunks[1:]), "later chunks were not packed"
+
+
+def test_packed_chunks_group_several_sentences():
+    packed = split_sentences(SENTENCE * 12)[1]
+    assert packed.count(".") > 1, f"one sentence per chunk defeats the point: {packed!r}"
+    assert len(packed) <= TARGET_CHUNK_CHARS
+
+
+def test_packing_never_crosses_a_paragraph():
+    chunks = normalize_chunks("First paragraph here.\n\nSecond paragraph here.")
+    assert [c for c, _ in chunks] == ["First paragraph here.", "Second paragraph here."]
+
+
+def test_last_chunk_of_each_paragraph_is_flagged():
+    text = "\n\n".join([SENTENCE * 6, SENTENCE * 6])
+    flags = [para_end for _, para_end in normalize_chunks(text)]
+    assert flags[-1] is True
+    assert flags.count(True) == 2, f"expected one flag per paragraph, got {flags}"
+    assert False in flags, "a multi-chunk paragraph should have unflagged chunks"
+
+
+def test_a_tiny_trailing_fragment_still_merges():
+    assert split_sentences("A perfectly ordinary opening sentence of decent length. Yes.") == [
+        "A perfectly ordinary opening sentence of decent length. Yes."
+    ]

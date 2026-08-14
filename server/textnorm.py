@@ -19,7 +19,12 @@ from pathlib import Path
 
 from num2words import num2words
 
-from .config import MAX_CHUNK_CHARS, MIN_CHUNK_CHARS
+from .config import (
+    FIRST_CHUNK_CHARS,
+    MAX_CHUNK_CHARS,
+    MIN_CHUNK_CHARS,
+    TARGET_CHUNK_CHARS,
+)
 
 # --------------------------------------------------------------------------
 # clean
@@ -360,11 +365,21 @@ def _hard_split(sentence: str, max_chars: int) -> list[str]:
     return final
 
 
-def split_sentences(
-    text: str, min_chars: int = MIN_CHUNK_CHARS, max_chars: int = MAX_CHUNK_CHARS
-) -> list[str]:
-    """Split into synthesis chunks: whole sentences, merged if tiny, cut if huge."""
-    chunks: list[str] = []
+def split_chunks(
+    text: str,
+    min_chars: int = MIN_CHUNK_CHARS,
+    max_chars: int = MAX_CHUNK_CHARS,
+    first_chars: int = FIRST_CHUNK_CHARS,
+    target_chars: int = TARGET_CHUNK_CHARS,
+) -> list[tuple[str, bool]]:
+    """Split into synthesis chunks, flagging the ones that end a paragraph.
+
+    Sentences are packed together up to `target_chars` so Kokoro can carry
+    intonation across a full stop rather than restarting at every one. Only the
+    very first chunk uses the smaller `first_chars`, because it alone decides
+    how soon audio starts; by the time it is playing the prefetch is ahead.
+    """
+    chunks: list[tuple[str, bool]] = []
     for paragraph in text.split("\n\n"):
         paragraph = " ".join(paragraph.split())
         if not paragraph:
@@ -373,18 +388,31 @@ def split_sentences(
         for sentence in _raw_sentences(paragraph):
             sentences.extend(_hard_split(sentence, max_chars))
 
-        # Merge fragments that are too short to carry their own prosody. A short
-        # chunk sounds clipped whether it is the leading or the trailing one, so
-        # either side being under the threshold triggers a merge.
-        merged: list[str] = []
+        packed: list[str] = []
         for sentence in sentences:
-            if merged and (len(merged[-1]) < min_chars or len(sentence) < min_chars):
-                if len(merged[-1]) + len(sentence) + 1 <= max_chars:
-                    merged[-1] = f"{merged[-1]} {sentence}"
-                    continue
-            merged.append(sentence)
-        chunks.extend(merged)
+            if not packed:
+                packed.append(sentence)
+                continue
+            # A fragment too short to carry its own prosody sounds clipped
+            # whether it leads or trails, so either side being tiny forces a
+            # merge even past the target - but never past the hard ceiling.
+            target = first_chars if len(chunks) + len(packed) == 1 else target_chars
+            tiny = len(packed[-1]) < min_chars or len(sentence) < min_chars
+            combined = len(packed[-1]) + 1 + len(sentence)
+            if (combined <= target or tiny) and combined <= max_chars:
+                packed[-1] = f"{packed[-1]} {sentence}"
+                continue
+            packed.append(sentence)
+
+        chunks.extend((c, i == len(packed) - 1) for i, c in enumerate(packed))
     return chunks
+
+
+def split_sentences(
+    text: str, min_chars: int = MIN_CHUNK_CHARS, max_chars: int = MAX_CHUNK_CHARS
+) -> list[str]:
+    """The chunk texts alone, for callers that do not care about paragraphs."""
+    return [c for c, _ in split_chunks(text, min_chars, max_chars)]
 
 
 def expand_acronyms(text: str) -> str:
@@ -397,7 +425,16 @@ def expand_acronyms(text: str) -> str:
     return _ACRONYM.sub(_acronym, text)
 
 
+def normalize_chunks(text: str) -> list[tuple[str, bool]]:
+    """clean -> expand -> split -> spell out acronyms; the full server pipeline.
+
+    Each chunk is paired with whether it ends a paragraph, so the pause after it
+    can be longer than the one between sentences.
+    """
+    chunks = split_chunks(expand_text(clean_text(text)))
+    return [(expand_acronyms(c), para_end) for c, para_end in chunks]
+
+
 def normalize(text: str) -> list[str]:
-    """clean -> expand -> split -> spell out acronyms; the full server pipeline."""
-    chunks = split_sentences(expand_text(clean_text(text)))
-    return [expand_acronyms(c) for c in chunks]
+    """The spoken chunks alone."""
+    return [c for c, _ in normalize_chunks(text)]

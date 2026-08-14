@@ -15,7 +15,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from .config import CACHE_DIR, CACHE_ENABLED, CACHE_MAX_BYTES, KEY_REGISTRY_MAX
+from .config import AUDIO_REV, CACHE_DIR, CACHE_ENABLED, CACHE_MAX_BYTES, KEY_REGISTRY_MAX
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +23,13 @@ Synthesizer = Callable[[], Awaitable[bytes]]
 
 
 def make_key(engine_id: str, voice: str, speed: float, text: str) -> str:
-    payload = "\x00".join([engine_id, voice, f"{speed:.3f}", text])
+    """Content address for one rendered chunk.
+
+    AUDIO_REV is part of the payload so that changing how audio is produced -
+    trimming, gaps, anything that alters the sound of the same text - retires
+    every existing entry instead of serving stale renders forever.
+    """
+    payload = "\x00".join([str(AUDIO_REV), engine_id, voice, f"{speed:.3f}", text])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

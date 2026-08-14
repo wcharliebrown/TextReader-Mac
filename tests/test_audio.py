@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from server import audio as au
+from server import config as au_cfg
 from server.config import SAMPLE_RATE
 
 
@@ -77,3 +78,46 @@ def test_streaming_header_declares_open_ended_length():
     header = au.streaming_wav_header()
     assert header[:4] == b"RIFF"
     assert int.from_bytes(header[40:44], "little") > 10**9
+
+
+# --------------------------------------------------------------------------
+# Chunk edges. Kokoro renders ~0.30s of lead-in and ~0.47s of tail on every
+# chunk; left in, they stack with the programmed gap at every seam.
+# --------------------------------------------------------------------------
+
+
+def _padded(lead_s: float, body_s: float, tail_s: float) -> np.ndarray:
+    return np.concatenate([
+        np.zeros(int(lead_s * SAMPLE_RATE), dtype=np.float32),
+        np.full(int(body_s * SAMPLE_RATE), 0.5, dtype=np.float32),
+        np.zeros(int(tail_s * SAMPLE_RATE), dtype=np.float32),
+    ])
+
+
+def test_trim_edges_removes_lead_and_tail_silence():
+    trimmed = au.trim_edges(_padded(0.30, 1.0, 0.47))
+    # The pad on each side is deliberate, so the attack and decay survive.
+    expected = 1.0 + 2 * au_cfg.TRIM_PAD_S
+    assert abs(trimmed.size / SAMPLE_RATE - expected) < 0.01
+
+
+def test_trim_edges_keeps_silence_in_the_middle():
+    with_pause = np.concatenate([_padded(0.3, 0.5, 0.0), _padded(0.4, 0.5, 0.47)])
+    trimmed = au.trim_edges(with_pause)
+    assert trimmed.size / SAMPLE_RATE > 1.3, "an internal pause was eaten"
+
+
+@pytest.mark.parametrize("audio", [np.zeros(0, dtype=np.float32), np.zeros(4800, dtype=np.float32)])
+def test_trim_edges_handles_empty_and_silent_input(audio):
+    assert au.trim_edges(audio).size == 0
+
+
+def test_join_accepts_one_gap_per_seam():
+    seg = np.ones(SAMPLE_RATE, dtype=np.float32)
+    joined = au.join([seg, seg, seg], [0.1, 0.5])
+    assert abs(joined.size / SAMPLE_RATE - (3 + 0.6)) < 0.001
+
+
+def test_join_still_accepts_a_single_gap():
+    seg = np.ones(SAMPLE_RATE, dtype=np.float32)
+    assert abs(au.join([seg, seg], 0.25).size / SAMPLE_RATE - 2.25) < 0.001
