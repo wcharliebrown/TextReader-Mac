@@ -182,6 +182,7 @@ server/
   app.py        FastAPI routes, job registry, background rendering
   engine.py     TTSEngine protocol; MLX (primary) and PyTorch (fallback) Kokoro
   textnorm.py   clean → disambiguate → expand → split; decides how it sounds
+  diagnose.py   round-trip check: speak, transcribe, diff against the input
   cache.py      content-addressed WAV cache, in-flight dedup, LRU prune
   audio.py      WAV framing, ffmpeg encoding
 extension/      Chrome MV3: service worker, offscreen player, on-page controls
@@ -199,11 +200,26 @@ Audio is cached in `~/Library/Caches/TextReaderAPI`, capped at 2 GB, pruned LRU.
 ## Tests
 
 ```sh
-.venv/bin/python -m pytest          # 170: text pipeline, phonemes, cache, HTTP API
+.venv/bin/python -m pytest          # 197: text pipeline, phonemes, cache, HTTP API
 node scripts/test_player.mjs        # 17: offscreen player state machine
 node scripts/test_background.mjs    # 17: menu / hotkey / offscreen / download routing
 .venv/bin/python scripts/bench.py   # latency and throughput
 ```
+
+There is also a diagnostics mode for tuning the normalization rules themselves
+(`uv pip install -e '.[diagnose]'` first — it needs Whisper):
+
+```sh
+.venv/bin/python -m server.diagnose article.txt   # or:  pbpaste | ... -m server.diagnose -
+```
+
+It sends the text through the running server, transcribes each chunk's audio
+with Whisper on MLX, and prints every place the transcript disagrees with what
+the engine was asked to say — each one a candidate for a new rule in
+`textnorm.py`. It hears dropped words, garbled respellings and mangled numbers;
+it cannot hear a wrong vowel that spells the same word (Whisper corrects those
+while listening), which is why the phoneme assertions in
+`tests/test_pronunciation.py` exist as well.
 
 The two Node harnesses exist because the extension's long-lived contexts have no
 console reachable without opening their own devtools windows. They stub `chrome.*`

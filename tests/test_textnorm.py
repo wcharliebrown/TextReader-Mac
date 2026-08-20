@@ -393,3 +393,75 @@ def test_heteronyms_are_fixed_by_the_time_the_pipeline_finishes():
 def test_ai_is_no_longer_read_as_uh_eye():
     """Spaced out, 'A I' put the article in front of the letter I."""
     assert spoken("The AI team shipped it.") == "The AI team shipped it."
+
+
+# --------------------------------------------------------------------------
+# times, dates, fractions and other digit shapes the round trip caught
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "spoken"),
+    [
+        ("at 3:30 p.m.", "at three thirty P M"),
+        ("a 9:00 start", "a nine o'clock start"),
+        ("by 17:00 sharp", "by five P M sharp"),
+        ("the 9:05 train", "the nine oh five train"),
+        ("John 3:16", "John three sixteen"),
+    ],
+)
+def test_clock_times_are_said_not_punctuated(text, spoken):
+    assert expand_text(text) == spoken
+
+
+def test_phone_shaped_numbers_keep_their_zeroes():
+    assert expand_text("call 555-0123") == "call five five five, zero one two three"
+    assert (
+        expand_text("dial 800-555-0199")
+        == "dial eight zero zero, five five five, zero one nine nine"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "spoken"),
+    [
+        ("about 1/2 of them", "about one half of them"),
+        ("a 3/4 majority", "a three quarters majority"),
+        ("roughly 2/3 done", "roughly two thirds done"),
+    ],
+)
+def test_common_fractions_are_words(text, spoken):
+    assert expand_text(text) == spoken
+
+
+def test_dates_with_slashes_are_left_as_slashes():
+    # Reading 12/05 as a date means guessing day/month order; saying the
+    # slash is ugly but never wrong.
+    assert expand_text("on 12/05/2025") == "on twelve slash five slash twenty twenty-five"
+
+
+def test_number_sign_and_scores():
+    assert expand_text("the No. 7 seed won 3-2") == "the number seven seed won three to two"
+    assert expand_text("No. Not that.") == "No. Not that."
+
+
+def test_small_ranges_read_as_to():
+    assert expand_text("takes 2-3 weeks") == "takes two to three weeks"
+    assert expand_text("pages 3-5") == "pages three to five"
+
+
+@pytest.mark.parametrize(
+    ("text", "spoken"),
+    [
+        ("in the 1990s", "in the nineteen nineties"),
+        ("the '80s revival", "the eighties revival"),
+        ("the 1800s", "the eighteen hundreds"),
+    ],
+)
+def test_decades_are_pluralised_words(text, spoken):
+    assert expand_text(text) == spoken
+
+
+def test_month_abbreviations_are_expanded():
+    assert expand_text("before Jan. 5") == "before January five"
+    assert expand_text("the Sept. 11 report") == "the September eleven report"

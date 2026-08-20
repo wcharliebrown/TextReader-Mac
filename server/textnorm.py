@@ -255,6 +255,9 @@ _ABBREVIATIONS = {
     "Inc.": "Incorporated", "Ltd.": "Limited", "Corp.": "Corporation",
     "Co.": "Company", "Jr.": "Junior", "Sr.": "Senior",
     "a.m.": "A M", "p.m.": "P M", "U.S.": "US", "U.K.": "UK", "E.U.": "EU",
+    "Jan.": "January", "Feb.": "February", "Mar.": "March", "Apr.": "April",
+    "Jun.": "June", "Jul.": "July", "Aug.": "August", "Sep.": "September",
+    "Sept.": "September", "Oct.": "October", "Nov.": "November", "Dec.": "December",
 }
 # The lookbehind is load-bearing: without it "est." matches inside "best.",
 # producing "bestimated", and "vs." matches inside "revs.".
@@ -320,6 +323,12 @@ _UNIT = re.compile(
     re.I,
 )
 _ORDINAL = re.compile(r"\b(\d+)(st|nd|rd|th)\b", re.I)
+_TIME = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b(?!:)")
+_PHONE = re.compile(r"\b(?:\d{3}[-.])?\d{3}[-.]\d{4}\b")
+_FRACTION = re.compile(r"(?<![\d/.])(\d{1,2})/(\d{1,2})(?![\d/.])")
+_NO_NUM = re.compile(r"\b[Nn]o\.\s*(?=\d)")
+_SCORE = re.compile(r"(?<![\d-])\b(\d{1,2})\s?-\s?(\d{1,2})\b(?!-?\d)")
+_DECADE = re.compile(r"['\u2019]?\b(1[5-9]\d0|20\d0|[2-9]0)s\b")
 _YEAR_RANGE = re.compile(r"\b(1[5-9]\d{2}|20\d{2})\s?-\s?(1[5-9]\d{2}|20\d{2})\b")
 _YEAR = re.compile(r"(?<![\d.,])(1[5-9]\d{2}|20\d{2})(?!\d|[.,]\d)")
 _NUMBER = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)(?![\w])")
@@ -375,6 +384,48 @@ def _ordinal(m: re.Match[str]) -> str:
         return m.group(0)
 
 
+def _time(m: re.Match[str]) -> str:
+    """'3:30' -> 'three thirty'; a 24-hour clock implies its own meridiem."""
+    hour, mins = int(m.group(1)), int(m.group(2))
+    suffix = ""
+    if hour == 0:
+        hour = 12
+    elif hour > 12:
+        hour -= 12
+        suffix = " P M"
+    said = _tidy_number_words(num2words(hour))
+    if mins == 0:
+        return said + suffix if suffix else said + " o'clock"
+    minute = ("oh " if mins < 10 else "") + _tidy_number_words(num2words(mins))
+    return f"{said} {minute}{suffix}"
+
+
+def _phone(m: re.Match[str]) -> str:
+    """Phone-shaped digit groups are said digit by digit, zeroes included."""
+    groups = re.split(r"[-.]", m.group(0))
+    return ", ".join(" ".join(num2words(int(d)) for d in g) for g in groups)
+
+
+def _fraction(m: re.Match[str]) -> str:
+    num, den = int(m.group(1)), int(m.group(2))
+    if not 1 <= num < den <= 10:
+        return m.group(0)
+    if den == 2:
+        part = "half" if num == 1 else "halves"
+    elif den == 4:
+        part = "quarter" if num == 1 else "quarters"
+    else:
+        part = _tidy_number_words(num2words(den, to="ordinal")) + ("s" if num > 1 else "")
+    return f"{_tidy_number_words(num2words(num))} {part}"
+
+
+def _decade(m: re.Match[str]) -> str:
+    """'the 1990s' -> 'the nineteen nineties'; 'the 90s' -> 'the nineties'."""
+    year = int(m.group(1))
+    said = _say_year(m.group(1)) if year >= 1000 else _tidy_number_words(num2words(year))
+    return said[:-1] + "ies" if said.endswith("y") else said + "s"
+
+
 def _degrees(m: re.Match[str]) -> str:
     scale = {"C": "Celsius", "F": "Fahrenheit", "K": "Kelvin"}[m.group(2)]
     return f"{_say_number(m.group(1))} degrees {scale}"
@@ -406,15 +457,21 @@ def expand_text(text: str) -> str:
     text = _URL.sub(lambda m: m.group(1).replace(".", " dot "), text)
     text = _EMAIL.sub(lambda m: "an email address", text)
 
+    text = _TIME.sub(_time, text)
+    text = _PHONE.sub(_phone, text)
     text = _CURRENCY_MAG.sub(_currency_mag, text)
     text = _CURRENCY.sub(_currency, text)
     text = _PERCENT.sub(lambda m: f"{_say_number(m.group(1))} percent", text)
     text = _DEGREES.sub(_degrees, text)
     text = _UNIT.sub(_unit, text)
+    text = _FRACTION.sub(_fraction, text)
+    text = _NO_NUM.sub("number ", text)
     text = _ORDINAL.sub(_ordinal, text)
 
     text = _ABBREV_RE.sub(lambda m: _ABBREVIATIONS[m.group(0)], text)
 
+    text = _DECADE.sub(_decade, text)
+    text = _SCORE.sub(lambda m: f"{_say_number(m.group(1))} to {_say_number(m.group(2))}", text)
     text = _YEAR_RANGE.sub(lambda m: f"{_say_year(m.group(1))} to {_say_year(m.group(2))}", text)
     text = _YEAR.sub(lambda m: _say_year(m.group(1)), text)
     text = _NUMBER.sub(lambda m: _say_number(m.group(1)), text)
