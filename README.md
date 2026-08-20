@@ -115,8 +115,24 @@ rather than serving them forever.
 **Text normalisation does most of the work.** A model reading raw web text will
 happily pronounce `[1]`, read `1995` as "one thousand nine hundred ninety-five",
 say "G-D-P" as a word and break a sentence in the middle of `Dr. Smith`.
-`server/textnorm.py` is three pure functions — clean, expand, split — and it is
-where most of the "sounds less robotic" gain lives.
+`server/textnorm.py` is four pure functions — clean, disambiguate, expand, split
+— and it is where most of the "sounds less robotic" gain lives.
+
+The disambiguate stage exists because spelling does not settle how a word is
+said. Kokoro picks a heteronym's sound from a part-of-speech tag and is right
+about "live", "wind", "record" and two dozen others — but it reads a present
+tense "they read" as *red*, and it has no entry at all for lead the metal, so
+"lead pipe" always rhymed with *feed*. Those cases are respelled in context
+(`read` → `reed`, `lead` → `led`) unless the sentence carries a past-tense cue.
+Respelling in ordinary words rather than phoneme markup keeps the stage
+independent of which engine is behind it.
+
+Initialisms turned out to be a case of doing too much rather than too little.
+Spacing out the letters — `CIA` → `C I A` — was meant to make the model say
+letter names, but a lone capital A is the article, so it came out "see eye *uh*",
+and `AI` came out "*uh* eye". Handed the token intact, Kokoro spells it
+correctly by itself; measured across sixty-odd initialisms only `JSON`, `YAML`
+and `IKEA` needed help, and they get a respelling each.
 
 **Everything is cached by content hash.** The key covers text, voice and speed,
 so a re-read is a disk read. Stopping also cancels the server's rendering pass,
@@ -165,7 +181,7 @@ curl -s -X POST localhost:8842/v1/audio/speech \
 server/
   app.py        FastAPI routes, job registry, background rendering
   engine.py     TTSEngine protocol; MLX (primary) and PyTorch (fallback) Kokoro
-  textnorm.py   clean → expand → split; decides how it sounds
+  textnorm.py   clean → disambiguate → expand → split; decides how it sounds
   cache.py      content-addressed WAV cache, in-flight dedup, LRU prune
   audio.py      WAV framing, ffmpeg encoding
 extension/      Chrome MV3: service worker, offscreen player, on-page controls
@@ -183,7 +199,7 @@ Audio is cached in `~/Library/Caches/TextReaderAPI`, capped at 2 GB, pruned LRU.
 ## Tests
 
 ```sh
-.venv/bin/python -m pytest          # 113: text pipeline, cache, encoders, HTTP API
+.venv/bin/python -m pytest          # 170: text pipeline, phonemes, cache, HTTP API
 node scripts/test_player.mjs        # 17: offscreen player state machine
 node scripts/test_background.mjs    # 17: menu / hotkey / offscreen / download routing
 .venv/bin/python scripts/bench.py   # latency and throughput

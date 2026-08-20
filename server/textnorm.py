@@ -1,14 +1,15 @@
 """Turn messy web text into clean, speakable sentences.
 
-Three pure stages so every rule is unit-testable. The only I/O is a cached,
+Four pure stages so every rule is unit-testable. The only I/O is a cached,
 best-effort read of the system word list used to tell an emphasised word
 (HUGE) from an initialism (CIA); it degrades to a built-in list if absent.
 
-    clean_text      strip the junk that copy-pasting from a web page drags along
-    expand_text     rewrite symbols, numbers and abbreviations as spoken words
-    split_sentences cut into chunks sized for low-latency streaming synthesis
+    clean_text        strip the junk that copy-pasting from a web page drags along
+    disambiguate_text respell heteronyms the G2P would otherwise read the wrong way
+    expand_text       rewrite symbols, numbers and abbreviations as spoken words
+    split_sentences   cut into chunks sized for low-latency streaming synthesis
 
-`normalize` runs all three.
+`normalize` runs all four.
 """
 from __future__ import annotations
 
@@ -91,6 +92,140 @@ def clean_text(text: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# disambiguate
+# --------------------------------------------------------------------------
+
+# Kokoro's G2P chooses a heteronym's sound from a part-of-speech tag, and it is
+# right far more often than not: "live", "wind", "tear", "record", "present",
+# "desert" and two dozen others need no help here. What follows is only the set
+# measured wrong, respelled as ordinary words the G2P already says correctly.
+# Respelling rather than phoneme markup keeps this stage engine-independent -
+# and a respelling has to be a real word, because anything else falls through
+# to the espeak fallback and comes out unpredictable.
+
+_SENT_EDGE = re.compile(r"[.!?\n]")
+
+
+def _sentence_around(text: str, start: int, end: int, radius: int = 200) -> str:
+    """The clause a match sits in, so a rule can look at its whole sentence."""
+    head = text[max(0, start - radius) : start]
+    head = head[max(head.rfind(c) for c in ".!?\n") + 1 :]
+    tail = text[end : end + radius]
+    edge = _SENT_EDGE.search(tail)
+    return head + text[start:end] + (tail[: edge.end()] if edge else tail)
+
+
+def _like(word: str, replacement: str) -> str:
+    """Carry the original word's capitalisation onto its respelling."""
+    return replacement.capitalize() if word[:1].isupper() else replacement
+
+
+# Anything that pins a bare "read" to the past. Without one of these, "they
+# read" is taken as present tense - which is the reading the G2P gets wrong.
+_PAST_CUE = re.compile(
+    r"\b(?:yesterday|ago|earlier|previously|recently|formerly|once|then"
+    r"|last\s+(?:night|week|month|year|time|century|summer|winter|spring|autumn)"
+    r"|back\s+in|in\s+(?:1[5-9]\d{2}|20\d{2}))\b",
+    re.I,
+)
+
+_ADVERB = r"(?:never|always|often|rarely|seldom|sometimes|usually|still|also|only|already|\w+ly)"
+
+# (pattern, respelling, blocker) - the pattern must capture the ambiguous word
+# as `w`; the blocker, when given, cancels the rule if it matches the sentence.
+_HETERONYMS: list[tuple[re.Pattern[str], str, re.Pattern[str] | None]] = [
+    # "read": the G2P is already right for the perfect and the passive, but a
+    # chunk can begin after the auxiliary that made it right, so pin it while
+    # the whole sentence is still in one piece.
+    (
+        re.compile(
+            r"\b(?:have|has|had|having|been|being|was|were|is|are|get|gets|got)"
+            r"(?:\s+" + _ADVERB + r")?\s+(?P<w>read)\b",
+            re.I,
+        ),
+        "red",
+        None,
+    ),
+    (re.compile(r"\b(?:well|widely|much|little|barely|hardly)[\s-]+(?P<w>read)\b", re.I), "red", None),
+    # The actual bug: a non-third-person present "read" is tagged VBP, and the
+    # lexicon maps VBP to the past-tense sound.
+    (
+        re.compile(
+            r"\b(?:I|we|you|they|who|people)"
+            r"(?:\s+" + _ADVERB + r")?\s+(?P<w>read)\b",
+            re.I,
+        ),
+        "reed",
+        _PAST_CUE,
+    ),
+    # "lead": the lexicon has no part-of-speech variants at all, so the metal is
+    # always wrong and the verb is always right. Only the metal needs a rule.
+    (
+        re.compile(
+            r"\b(?P<w>lead)[\s-](?:poisoning|paint|pipes?|piping|solder|acetate|shot"
+            r"|bullets?|weights?|dust|ore|smelter|glass|crystal|apron|foil"
+            r"|contamination|levels?|exposure|batter(?:y|ies))\b",
+            re.I,
+        ),
+        "led",
+        None,
+    ),
+    (
+        re.compile(
+            r"\b(?:tetraethyl|molten|toxic|blood|leached|leaching"
+            r"|traces?\s+of|levels?\s+of|amounts?\s+of|parts?\s+of"
+            r"|contains?|contained|containing)\s+(?P<w>lead)\b",
+            re.I,
+        ),
+        "led",
+        None,
+    ),
+    # "bass": the instrument is right, the fish is not.
+    (re.compile(r"\b(?:sea|striped|largemouth|smallmouth)\s+(?P<w>bass)\b", re.I), "base", None),
+    (re.compile(r"\b(?P<w>bass)\s+(?:fish\w*|boat)\b", re.I), "base", None),
+    # "resume" the noun reads as the verb; the accented spelling is in the
+    # lexicon and says it properly.
+    (
+        re.compile(
+            r"\b(?:an?|the|his|her|their|my|your|its|updated?|submitte?d?|attached?|polished?)"
+            r"\s+(?P<w>resume)\b",
+            re.I,
+        ),
+        "r\u00e9sum\u00e9",
+        None,
+    ),
+    (
+        re.compile(r"\b(?:the|their|our|your|these|those|\d+)\s+(?P<w>resumes)\b", re.I),
+        "r\u00e9sum\u00e9s",
+        None,
+    ),
+]
+
+
+def disambiguate_text(text: str) -> str:
+    """Respell words whose spelling does not settle how they are said.
+
+    Runs before expansion, so past-tense cues are still written as digits, and
+    before splitting, because a chunk that starts mid-sentence strips away the
+    very context these rules read.
+    """
+    for pattern, replacement, blocker in _HETERONYMS:
+
+        def swap(m: re.Match[str], replacement: str = replacement, blocker=blocker) -> str:
+            if blocker and blocker.search(_sentence_around(text, m.start(), m.end())):
+                return m.group(0)
+            head, tail = m.start(), m.start("w")
+            return (
+                m.group(0)[: tail - head]
+                + _like(m.group("w"), replacement)
+                + m.group(0)[m.end("w") - head :]
+            )
+
+        text = pattern.sub(swap, text)
+    return text
+
+
+# --------------------------------------------------------------------------
 # expand
 # --------------------------------------------------------------------------
 
@@ -153,8 +288,9 @@ def _english_words() -> frozenset[str]:
 
 
 # Initialisms whose lower-case form is an ordinary English word. Without this
-# list the dictionary check below would read "the US" as "the us".
-_ALWAYS_SPELL = {
+# list the dictionary check below would flatten "the US" to "the us", and the
+# G2P needs the capitals to know it is looking at letters and not a word.
+_KEEP_CAPS = {
     "US", "USA", "UK", "EU", "UN", "IT", "AI", "AR", "VR", "ID", "PC", "TV",
     "CD", "DVD", "HR", "PR", "IP", "OS", "UI", "UX", "EV", "AP", "ATM", "SEC",
     "WHO", "GPS", "USB", "CEO", "CFO", "CTO", "GDP", "FBI", "CIA", "IRS", "FDA",
@@ -165,10 +301,13 @@ _ALWAYS_SPELL = {
 _WORD_ACRONYMS = {
     "NASA", "NATO", "AIDS", "SCUBA", "LASER", "RADAR", "UNESCO", "UNICEF", "OPEC",
     "SWAT", "RAM", "ROM", "PIN", "GIF", "JPEG", "ASCII", "SQL", "WIFI", "ZIP",
-    "OK", "AM", "PM", "IKEA", "SAAB", "FIFA", "NAFTA", "SIM", "MIDI", "JSON",
-    "YAML", "CAPTCHA", "MOOC", "COVID", "SARS", "PDF", "GIS", "LIDAR", "CRISPR",
-    "I", "A",
+    "OK", "AM", "PM", "SAAB", "FIFA", "NAFTA", "SIM", "MIDI",
+    "CAPTCHA", "MOOC", "COVID", "SARS", "PDF", "GIS", "LIDAR", "CRISPR",
 }
+
+# The G2P says these as strings of letters when they are meant to be words.
+# Measured: everything else it was given intact came out right, these did not.
+_RESPELL_ACRONYM = {"JSON": "Jason", "YAML": "yammel", "IKEA": "Ikea"}
 
 _URL = re.compile(r"\b(?:https?://|www\.)([\w.-]+\.[a-z]{2,})(?:/[^\s]*)?", re.I)
 _EMAIL = re.compile(r"\b[\w.+-]+@([\w-]+\.[\w.-]+)\b")
@@ -247,16 +386,15 @@ def _unit(m: re.Match[str]) -> str:
 
 def _acronym(m: re.Match[str]) -> str:
     word = m.group(1)
-    if word in _ALWAYS_SPELL:
-        return " ".join(word)
-    if word in _WORD_ACRONYMS:
+    if word in _RESPELL_ACRONYM:
+        return _RESPELL_ACRONYM[word]
+    if word in _KEEP_CAPS or word in _WORD_ACRONYMS:
         return word
     # A real word in capitals is emphasis, not an initialism. Reading "HUGE" as
     # "H U G E" is the single most jarring thing the old rule did.
     if word.lower() in _english_words():
         return word.lower()
-    # Space-separated capitals make the G2P read individual letter names.
-    return " ".join(word)
+    return word
 
 
 def expand_text(text: str) -> str:
@@ -416,22 +554,24 @@ def split_sentences(
 
 
 def expand_acronyms(text: str) -> str:
-    """Spell out initialisms. Runs per chunk, after splitting.
+    """Hand each initialism to the G2P in the form it reads correctly.
 
-    Spacing the letters is what makes the G2P read letter names, but it also
-    makes a trailing capital look like an initial - so this has to come after
-    sentence boundaries are already decided.
+    Left intact, the G2P already spells "CIA" as see-eye-ay and says "NASA" as
+    a word. Spacing the letters ourselves was worse than doing nothing: a lone
+    capital A is the article, so "C I A" came out "see eye uh" and "A I" came
+    out "uh eye". All this does now is lower-case shouted words and respell the
+    handful the G2P mispronounces.
     """
     return _ACRONYM.sub(_acronym, text)
 
 
 def normalize_chunks(text: str) -> list[tuple[str, bool]]:
-    """clean -> expand -> split -> spell out acronyms; the full server pipeline.
+    """clean -> disambiguate -> expand -> split -> fix acronyms; the whole pipeline.
 
     Each chunk is paired with whether it ends a paragraph, so the pause after it
     can be longer than the one between sentences.
     """
-    chunks = split_chunks(expand_text(clean_text(text)))
+    chunks = split_chunks(expand_text(disambiguate_text(clean_text(text))))
     return [(expand_acronyms(c), para_end) for c, para_end in chunks]
 
 

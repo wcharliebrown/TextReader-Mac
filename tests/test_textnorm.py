@@ -8,6 +8,7 @@ import pytest
 from server.config import FIRST_CHUNK_CHARS, MAX_CHUNK_CHARS, TARGET_CHUNK_CHARS
 from server.textnorm import (
     clean_text,
+    disambiguate_text,
     expand_acronyms,
     expand_text,
     normalize,
@@ -114,8 +115,9 @@ def test_urls_become_spoken_domains():
     assert expand_text("See https://www.example.com/a/b now") == "See www dot example dot com now"
 
 
-def test_acronyms_spelled_out_but_words_left_alone():
-    assert expand_acronyms("The GDP and NASA") == "The G D P and NASA"
+def test_acronyms_are_handed_to_the_g2p_intact():
+    """The G2P spells GDP and says NASA; spacing the letters only broke that."""
+    assert expand_acronyms("The GDP and NASA") == "The GDP and NASA"
 
 
 # -- split ------------------------------------------------------------------
@@ -226,20 +228,29 @@ def test_shouted_real_words_are_not_spelled_out(shout):
     assert expand_acronyms(f"a {shout} deal") == f"a {shout.lower()} deal"
 
 
-@pytest.mark.parametrize("initialism", ["CIA", "FBI", "IMF", "HTTP"])
-def test_initialisms_are_still_spelled_out(initialism):
-    assert expand_acronyms(f"the {initialism} file") == f"the {' '.join(initialism)} file"
+@pytest.mark.parametrize("initialism", ["CIA", "FBI", "IMF", "HTTP", "FAA", "AI"])
+def test_initialisms_are_left_for_the_g2p_to_spell(initialism):
+    """Our own spacing turned a trailing letter A into the article: 'see eye uh'."""
+    assert expand_acronyms(f"the {initialism} file") == f"the {initialism} file"
 
 
-@pytest.mark.parametrize("word_acronym", ["NASA", "JSON", "SCUBA"])
+@pytest.mark.parametrize("word_acronym", ["NASA", "COVID", "SCUBA"])
 def test_acronyms_pronounced_as_words_are_left_alone(word_acronym):
     assert expand_acronyms(f"the {word_acronym} file") == f"the {word_acronym} file"
 
 
+@pytest.mark.parametrize(
+    "acronym, spoken", [("JSON", "Jason"), ("YAML", "yammel"), ("IKEA", "Ikea")]
+)
+def test_the_few_the_g2p_gets_wrong_are_respelled(acronym, spoken):
+    """Left alone these three come out as strings of letters, not as words."""
+    assert expand_acronyms(f"a {acronym} file") == f"a {spoken} file"
+
+
 @pytest.mark.parametrize("ambiguous", ["US", "IT", "AI", "SEC"])
-def test_initialisms_that_are_also_words_are_spelled_out(ambiguous):
+def test_initialisms_that_are_also_words_keep_their_capitals(ambiguous):
     """'the US' must not degrade to 'the us' via the dictionary check."""
-    assert expand_acronyms(f"the {ambiguous} team") == f"the {' '.join(ambiguous)} team"
+    assert expand_acronyms(f"the {ambiguous} team") == f"the {ambiguous} team"
 
 
 def test_word_list_falls_back_when_the_system_dictionary_is_missing(monkeypatch):
@@ -292,3 +303,93 @@ def test_a_tiny_trailing_fragment_still_merges():
     assert split_sentences("A perfectly ordinary opening sentence of decent length. Yes.") == [
         "A perfectly ordinary opening sentence of decent length. Yes."
     ]
+
+
+# --------------------------------------------------------------------------
+# Heteronyms: words the G2P would otherwise read with the wrong vowel. Only the
+# cases measured wrong are listed; "live", "wind", "record" and the rest are
+# deliberately absent because the G2P already gets them right.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # Present tense is the bug: the tagger calls it VBP and the lexicon
+        # maps VBP to the past-tense sound.
+        ("They read widely.", "They reed widely."),
+        ("I read books every day.", "I reed books every day."),
+        ("We read it now.", "We reed it now."),
+        ("You read too fast.", "You reed too fast."),
+        ("people read less than they claim", "people reed less than they claim"),
+        ("They never read it.", "They never reed it."),
+        # A past-tense cue anywhere in the sentence cancels that.
+        ("I read it yesterday.", "I read it yesterday."),
+        ("We read it last week.", "We read it last week."),
+        ("They read it two years ago.", "They read it two years ago."),
+        # The perfect and the passive are pinned so a chunk boundary cannot
+        # strip the auxiliary that makes them right.
+        ("She has read it.", "She has red it."),
+        ("The book was read aloud.", "The book was red aloud."),
+        ("a widely read author", "a widely red author"),
+        # Untouched: the infinitive and the modal already say it correctly.
+        ("He will read it.", "He will read it."),
+        ("Please read the book.", "Please read the book."),
+    ],
+)
+def test_read_is_respelled_by_context(raw, expected):
+    assert disambiguate_text(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # The lexicon has no part-of-speech variants for "lead", so the metal
+        # is wrong every single time.
+        ("The lead pipe.", "The led pipe."),
+        ("Lead paint is toxic.", "Led paint is toxic."),
+        ("lead poisoning", "led poisoning"),
+        ("traces of lead in the water", "traces of led in the water"),
+        ("blood lead levels", "blood led levels"),
+        # The verb and the noun are right already and must stay put.
+        ("She will lead the team.", "She will lead the team."),
+        ("the lead singer", "the lead singer"),
+        ("a sales lead", "a sales lead"),
+        ("a lead role", "a lead role"),
+        # "leaded" is a different word and the G2P knows it.
+        ("leaded gasoline", "leaded gasoline"),
+    ],
+)
+def test_lead_the_metal_is_respelled(raw, expected):
+    assert disambiguate_text(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("striped bass", "striped base"),
+        ("bass fishing", "base fishing"),
+        ("the bass guitar", "the bass guitar"),
+        ("a bass line", "a bass line"),
+        ("his resume", "his r\u00e9sum\u00e9"),
+        ("the resumes piled up", "the r\u00e9sum\u00e9s piled up"),
+        ("they resume work", "they resume work"),
+    ],
+)
+def test_other_measured_heteronyms(raw, expected):
+    assert disambiguate_text(raw) == expected
+
+
+def test_respelling_keeps_the_original_capitalisation():
+    assert disambiguate_text("Lead poisoning spreads.") == "Led poisoning spreads."
+
+
+def test_heteronyms_are_fixed_by_the_time_the_pipeline_finishes():
+    out = spoken("The lead pipe leaked, and they read about it in the paper.")
+    assert "led pipe" in out
+    assert "they reed about" in out
+
+
+def test_ai_is_no_longer_read_as_uh_eye():
+    """Spaced out, 'A I' put the article in front of the letter I."""
+    assert spoken("The AI team shipped it.") == "The AI team shipped it."
