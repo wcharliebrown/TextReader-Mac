@@ -12,7 +12,7 @@
     <string>uvicorn</string>
     <string>server.app:app</string>
     <string>--host</string>
-    <string>127.0.0.1</string>
+    <string>__HOST__</string>
     <string>--port</string>
     <string>8842</string>
   </array>

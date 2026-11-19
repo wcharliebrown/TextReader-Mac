@@ -7,14 +7,22 @@ LABEL="com.textreader.api"
 TARGET="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 LOG="$HOME/Library/Logs/TextReaderAPI/server.log"
+# 127.0.0.1 keeps the server private to this Mac. TEXTREADER_HOST=0.0.0.0 lets
+# other machines on the LAN use it too; there is no authentication.
+HOST="${TEXTREADER_HOST:-127.0.0.1}"
 
 mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$LOG")"
-sed -e "s|__PROJECT__|$PROJECT|g" -e "s|__LOG__|$LOG|g" \
+sed -e "s|__PROJECT__|$PROJECT|g" -e "s|__LOG__|$LOG|g" -e "s|__HOST__|$HOST|g" \
   "$PROJECT/scripts/com.textreader.api.plist" > "$TARGET"
 
 # bootout is expected to fail when nothing is loaded yet.
 launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$UID" "$TARGET"
+# bootout returns before the old instance is gone, and bootstrapping over it
+# fails with "5: Input/output error", so retry briefly.
+for _ in 1 2 3 4 5; do
+  launchctl bootstrap "gui/$UID" "$TARGET" 2>/dev/null && break
+  sleep 1
+done
 launchctl kickstart -k "gui/$UID/$LABEL"
 
 echo "installed $TARGET"
